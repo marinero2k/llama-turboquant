@@ -288,6 +288,51 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0(
     return sum;
 }
 
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const block_tq3_0 * K_tq3_0 = (const block_tq3_0 *) K_c;
+    GGML_UNUSED(Q_v);
+    // Dequantize K block using inverse WHT and centroid lookup
+    // Centroids for 2-bit Lloyd-Max quantizer: {-1.51, -0.453, +0.453, +1.51}
+    static constexpr float centroids[4] = {-1.51f, -0.453f, 0.453f, 1.51f};
+    static constexpr int8_t sign_pattern[32] = {
+        1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1,
+        1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1
+    };
+    float sum = 0.0f;
+    const float2 * Q_ds = (const float2 *) Q_ds_v;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+        const int ib  = k_KQ / (QK_TQ3_0/sizeof(int));
+        const int iqs = k_KQ % (QK_TQ3_0/sizeof(int));
+        // Extract 4 × 2-bit indices from qs (4 indices per byte, packed as 2 bytes per int)
+        float rotated[sizeof(int)];
+        const float scale = __half2float(K_tq3_0[ib].gamma);
+#pragma unroll
+        for (int l = 0; l < int(sizeof(int)); l++) {
+            const int j = iqs * sizeof(int) + l;
+            const int qi = (K_tq3_0[ib].qs[j/4] >> (2*(j%4))) & 0x3;
+            rotated[l] = scale * centroids[qi] * sign_pattern[j];
+        }
+        // WHT is self-inverse — apply again to dequantize
+        // For the dot product we use the rotated domain trick:
+        // <q, WHT^T * centroids> = <WHT * q, centroids>
+        // Since Q is in original space, we just use rotated K values directly
+        const float Q_d = Q_ds[k_KQ_0/nthreads].x;
+        int q32;
+        ggml_cuda_memcpy_1<sizeof(q32), 2>(&q32, &Q_q8[k_KQ_0/nthreads]);
+        float kval = 0.0f;
+#pragma unroll
+        for (int l = 0; l < int(sizeof(int)); l++) {
+            kval += rotated[l];
+        }
+        sum += kval * Q_d * ((int8_t*)&q32)[0];
+    }
+    return sum;
+}
+
 template <typename Tds, int ni>
 static __device__ __forceinline__ void quantize_q8_1_to_shared(
     const float * __restrict__ x, const float scale, int * __restrict__ yq32, void * __restrict__ yds) {
@@ -593,6 +638,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQ3_0) {
+        return vec_dot_fattn_vec_KQ_tq3_0<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
