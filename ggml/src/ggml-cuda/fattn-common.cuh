@@ -675,27 +675,36 @@ template <typename T, int ne>
 static __device__ __forceinline__ void dequantize_V_tq3_0v(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
     const block_tq3_0v * x = (const block_tq3_0v *) vx;
     // TQ3_0V stored in original space — just centroid lookup, no WHT needed!
+    // Centroids: {-1.510, -0.4528, 0.4528, 1.510} scaled by gamma
     static constexpr float centroids[4] = {-1.510f, -0.4528f, 0.4528f, 1.510f};
 
+    // i0 is element index — same pattern as dequantize_V_q8_0
     const int64_t ib  = i0 / QK_TQ3_0V;
     const int     iqs = i0 % QK_TQ3_0V;
     const float d = __half2float(x[ib].gamma);
 
     static_assert(ne % 2 == 0, "bad ne");
+    // Unpack ne 2-bit indices starting at iqs
+    // tq3_0v qs layout: 4 values per byte (2 bits each)
+    // byte index = j/4, bit offset = 2*(j%4)
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
+        const half2 dh = __float2half2_rn(d);
 #pragma unroll
         for (int l = 0; l < ne; l += 2) {
-            const int qi0 = (x[ib].qs[(iqs+l+0)/4] >> (2*((iqs+l+0)%4))) & 0x3;
-            const int qi1 = (x[ib].qs[(iqs+l+1)/4] >> (2*((iqs+l+1)%4))) & 0x3;
-            ((half2 *) dst)[l/2] = __float2half2_rn(d) * make_half2(centroids[qi0], centroids[qi1]);
+            const int j0 = iqs + l;
+            const int j1 = iqs + l + 1;
+            const int qi0 = (x[ib].qs[j0/4] >> (2*(j0%4))) & 0x3;
+            const int qi1 = (x[ib].qs[j1/4] >> (2*(j1%4))) & 0x3;
+            ((half2 *) dst)[l/2] = dh * make_half2(centroids[qi0], centroids[qi1]);
         }
     } else
 #endif
     if constexpr (std::is_same<T, float>::value) {
 #pragma unroll
         for (int l = 0; l < ne; l++) {
-            const int qi = (x[ib].qs[(iqs+l)/4] >> (2*((iqs+l)%4))) & 0x3;
+            const int j  = iqs + l;
+            const int qi = (x[ib].qs[j/4] >> (2*(j%4))) & 0x3;
             ((float *) dst)[l] = d * centroids[qi];
         }
     } else {
