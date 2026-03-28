@@ -293,30 +293,31 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
     const block_tq3_0 * K_tq3_0 = (const block_tq3_0 *) K_c;
     GGML_UNUSED(Q_v);
-    // Centroids for 2-bit Lloyd-Max quantizer (Gaussian distribution after WHT)
-    static constexpr float centroids[4] = {-1.510f, -0.4528f, 0.4528f, 1.510f};
-    // Q has been pre-rotated with WHT in fattn-vec.cuh before quantization.
-    // K is stored in WHT-rotated space. So we can dot directly: <WHT(Q), stored_K>
+    // int8 centroids: {-127, -38, 38, 127} scaled from {-1.510, -0.4528, 0.4528, 1.510}
+    // scale = 1.510/127 so that centroid[i] = int8_c[i] * scale
+    static constexpr int8_t int8_centroids[4] = {-127, -38, 38, 127};
+    static constexpr float centroid_scale = 0.01188976377952756f; // 1.510/127
     float sum = 0.0f;
     const float2 * Q_ds = (const float2 *) Q_ds_v;
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
-        const int ib   = k_KQ / QI8_0;
-        const int iqs  = k_KQ % QI8_0;
-        const float K_d = __half2float(K_tq3_0[ib].gamma);
-        const float Q_d = Q_ds[k_KQ_0/nthreads].x;
-        int q32;
-        ggml_cuda_memcpy_1<sizeof(q32), 2>(&q32, &Q_q8[k_KQ_0/nthreads]);
-        const int8_t * Q_i8 = (const int8_t *) &q32;
-        float sumi = 0.0f;
+        const int ib  = k_KQ / QI8_0;
+        const int iqs = k_KQ % QI8_0;
+        // Pack 4 centroid int8 values into one int (same layout as q8_0 qs)
+        int v = 0;
+        int8_t * vb = (int8_t *) &v;
 #pragma unroll
-        for (int l = 0; l < int(sizeof(int)); l++) {
-            const int j   = iqs * sizeof(int) + l;
-            const int qi  = (K_tq3_0[ib].qs[j/4] >> (2*(j%4))) & 0x3;
-            sumi += K_d * centroids[qi] * Q_d * (float)Q_i8[l];
+        for (int l = 0; l < 4; l++) {
+            const int j  = iqs * 4 + l;
+            const int qi = (K_tq3_0[ib].qs[j/4] >> (2*(j%4))) & 0x3;
+            vb[l] = int8_centroids[qi];
         }
-        sum += sumi;
+        // K effective scale = gamma * centroid_scale
+        // Use same dp4a path as q8_0
+        const float K_d = __half2float(K_tq3_0[ib].gamma) * centroid_scale;
+        const float Q_d = Q_ds[k_KQ_0/nthreads].x;
+        sum += vec_dot_q8_0_q8_1_impl<float, 1>(&v, &Q_q8[k_KQ_0/nthreads], K_d, Q_d);
     }
     return sum;
 }
