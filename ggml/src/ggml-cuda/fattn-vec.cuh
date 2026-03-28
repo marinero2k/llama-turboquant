@@ -166,23 +166,22 @@ static __global__ void flash_attn_ext_vec(
                 const float * Q_f = (const float *) (Q + j*nb01);
                 constexpr int nthreads_quantize = D/sizeof(int) < WARP_SIZE ? D/sizeof(int) : WARP_SIZE;
                 if constexpr (type_K == GGML_TYPE_TQ3_0) {
-                    // Pre-rotate Q with WHT forward transform block by block (32 floats at a time)
-                    // Keeps only 32 floats in registers, avoids float Q_rot[256] stack spill
+                    // Pre-rotate Q with WHT forward transform.
+                    // D=256 = 8 blocks of 32. Rotate each block once, then quantize all 8 ints.
                     static constexpr int8_t tq3_signs[32] = {
                         +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
                         +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
                     };
                     static constexpr float inv_sqrt32 = 0.17677669529663688f;
+                    // Rotate all D/32 blocks, store in Q_rot_block, then quantize
+                    float Q_rot[D];
 #pragma unroll
-                    for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
-                        // Process one 32-element WHT block at a time
-                        const int block_start = (i0 * sizeof(int)) & ~31; // round down to 32-boundary
+                    for (int b = 0; b < D/32; b++) {
                         float xb[32];
 #pragma unroll
                         for (int i = 0; i < 32; i++) {
-                            xb[i] = Q_f[block_start + i] * tq3_signs[i];
+                            xb[i] = Q_f[b*32 + i] * tq3_signs[i];
                         }
-                        // WHT butterfly in registers
 #pragma unroll
                         for (int step = 1; step < 32; step <<= 1) {
 #pragma unroll
@@ -198,9 +197,13 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
                         for (int i = 0; i < 32; i++) {
                             xb[i] *= inv_sqrt32;
+                            Q_rot[b*32 + i] = xb[i];
                         }
+                    }
+#pragma unroll
+                    for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
                         quantize_q8_1_to_shared<float2, nthreads_quantize>
-                            (xb + (i0*sizeof(int) - block_start), scale, tmp_q_i32 + i0, tmp_q_ds + i0/QI8_1);
+                            (Q_rot + i0*sizeof(int), scale, tmp_q_i32 + i0, tmp_q_ds + i0/QI8_1);
                     }
                 } else {
 #pragma unroll
