@@ -281,6 +281,7 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     // TQ3_0 is always available regardless of FA_ALL_QUANTS
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_TQ3_0)
 
     GGML_ABORT("fatal error");
 }
@@ -358,7 +359,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     if (K->type != V->type) {
         // tq3_0 K-cache explicitly supports q8_0 and f16 V-cache
         const bool tq3_0_ok = K->type == GGML_TYPE_TQ3_0 &&
-            (V->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_F16);
+            (V->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_F16 || V->type == GGML_TYPE_TQ3_0);
         if (!tq3_0_ok) {
             return BEST_FATTN_KERNEL_NONE;
         }

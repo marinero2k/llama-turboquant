@@ -610,6 +610,66 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tq3_0 * x = (const block_tq3_0 *) vx;
+    static constexpr float centroids[4] = {-1.510f, -0.4528f, 0.4528f, 1.510f};
+    static constexpr int8_t tq3_signs[32] = {
+        +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
+        +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
+    };
+    static constexpr float inv_sqrt32 = 0.17677669529663688f;
+
+    // i0 is element index, find block and position
+    const int64_t ib  = i0 / QK_TQ3_0;
+    const int     iqs = i0 % QK_TQ3_0;
+    const float d = __half2float(x[ib].gamma);
+
+    // Dequantize full block to rotated space
+    float rotated[QK_TQ3_0];
+#pragma unroll
+    for (int j = 0; j < QK_TQ3_0; j++) {
+        const int qi = (x[ib].qs[j/4] >> (2*(j%4))) & 0x3;
+        rotated[j] = d * centroids[qi];
+    }
+    // Inverse WHT butterfly
+#pragma unroll
+    for (int step = 1; step < QK_TQ3_0; step <<= 1) {
+#pragma unroll
+        for (int i = 0; i < QK_TQ3_0; i += step*2) {
+#pragma unroll
+            for (int j = i; j < i+step; j++) {
+                float a = rotated[j], b = rotated[j+step];
+                rotated[j]       = a + b;
+                rotated[j+step]  = a - b;
+            }
+        }
+    }
+    // Normalize and undo sign flips
+#pragma unroll
+    for (int j = 0; j < QK_TQ3_0; j++) {
+        rotated[j] *= inv_sqrt32 * tq3_signs[j];
+    }
+    // Output ne values starting at iqs
+    static_assert(ne % 2 == 0, "bad ne");
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same<T, half>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; l += 2) {
+            ((half2 *) dst)[l/2] = make_half2(rotated[iqs+l], rotated[iqs+l+1]);
+        }
+    } else
+#endif
+    if constexpr (std::is_same<T, float>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; l++) {
+            ((float *) dst)[l] = rotated[iqs + l];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -650,6 +710,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQ3_0) {
+        return dequantize_V_tq3_0<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;
