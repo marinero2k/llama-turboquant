@@ -2954,6 +2954,7 @@ llama_context * llama_init_from_model(
     }
 
     // TQ3_0 K cache now has flash attention kernel support via vec_dot_fattn_vec_KQ_tq3_0
+    // TQ3_0V V cache stores in original space - compatible with FA
 
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_v)) {
         const uint32_t blck_size = ggml_blck_size(params.type_v);

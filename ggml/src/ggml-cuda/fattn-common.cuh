@@ -671,6 +671,38 @@ static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restric
     }
 }
 
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tq3_0v(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tq3_0v * x = (const block_tq3_0v *) vx;
+    // TQ3_0V stored in original space — just centroid lookup, no WHT needed!
+    static constexpr float centroids[4] = {-1.510f, -0.4528f, 0.4528f, 1.510f};
+
+    const int64_t ib  = i0 / QK_TQ3_0V;
+    const int     iqs = i0 % QK_TQ3_0V;
+    const float d = __half2float(x[ib].gamma);
+
+    static_assert(ne % 2 == 0, "bad ne");
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same<T, half>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; l += 2) {
+            const int qi0 = (x[ib].qs[(iqs+l+0)/4] >> (2*((iqs+l+0)%4))) & 0x3;
+            const int qi1 = (x[ib].qs[(iqs+l+1)/4] >> (2*((iqs+l+1)%4))) & 0x3;
+            ((half2 *) dst)[l/2] = __float2half2_rn(d) * make_half2(centroids[qi0], centroids[qi1]);
+        }
+    } else
+#endif
+    if constexpr (std::is_same<T, float>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; l++) {
+            const int qi = (x[ib].qs[(iqs+l)/4] >> (2*((iqs+l)%4))) & 0x3;
+            ((float *) dst)[l] = d * centroids[qi];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -713,6 +745,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_bf16<float, ne>;
     } else if constexpr (type_V == GGML_TYPE_TQ3_0) {
         return dequantize_V_tq3_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQ3_0V) {
+        return dequantize_V_tq3_0v<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;
