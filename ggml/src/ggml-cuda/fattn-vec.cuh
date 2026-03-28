@@ -166,22 +166,24 @@ static __global__ void flash_attn_ext_vec(
                 const float * Q_f = (const float *) (Q + j*nb01);
                 constexpr int nthreads_quantize = D/sizeof(int) < WARP_SIZE ? D/sizeof(int) : WARP_SIZE;
                 if constexpr (type_K == GGML_TYPE_TQ3_0) {
-                    // Pre-rotate Q with WHT forward transform.
-                    // D=256 = 8 blocks of 32. Rotate each block once, then quantize all 8 ints.
+                    // Pre-rotate Q with WHT forward transform so vec_dot can work
+                    // directly in rotated space: <WHT(Q), stored_K> = <Q, WHT^{-1}(stored_K)>
+                    // This avoids WHT inverse in the hot dot product path.
                     static constexpr int8_t tq3_signs[32] = {
                         +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
                         +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
                     };
                     static constexpr float inv_sqrt32 = 0.17677669529663688f;
-                    // Rotate all D/32 blocks, store in Q_rot_block, then quantize
+                    // Copy Q to local, apply WHT forward per block of 32
                     float Q_rot[D];
 #pragma unroll
-                    for (int b = 0; b < D/32; b++) {
-                        float xb[32];
+                    for (int i = 0; i < D; i++) {
+                        Q_rot[i] = Q_f[i] * tq3_signs[i % 32];
+                    }
+                    // WHT butterfly stages per block of 32
 #pragma unroll
-                        for (int i = 0; i < 32; i++) {
-                            xb[i] = Q_f[b*32 + i] * tq3_signs[i];
-                        }
+                    for (int b = 0; b < D/32; b++) {
+                        float * xb = Q_rot + b*32;
 #pragma unroll
                         for (int step = 1; step < 32; step <<= 1) {
 #pragma unroll
@@ -194,10 +196,10 @@ static __global__ void flash_attn_ext_vec(
                                 }
                             }
                         }
+                        // Normalize once after all butterfly stages
 #pragma unroll
                         for (int i = 0; i < 32; i++) {
                             xb[i] *= inv_sqrt32;
-                            Q_rot[b*32 + i] = xb[i];
                         }
                     }
 #pragma unroll
